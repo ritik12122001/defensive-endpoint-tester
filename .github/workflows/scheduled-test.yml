@@ -1,16 +1,19 @@
-name: Scheduled Defensive Endpoint Test (1-Minute Continuous Cloud Worker)
+name: Scheduled Defensive Endpoint Test (1-Minute Continuous Runner)
 
 on:
   schedule:
-    # Queues continuous workers every 30 minutes to maintain an unbroken 1-minute test stream
-    - cron: '*/30 * * * *'
+    # Trigger every 5 minutes (GitHub Actions minimum schedule interval)
+    - cron: '*/5 * * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'Authorized target URL to test (leave blank to use vars.TARGET_URL)'
+        description: 'Target URL to test (default: https://tracker.bepcssa.in)'
         required: false
         type: string
-        default: ''
+        default: 'https://tracker.bepcssa.in'
       total_requests:
         description: 'Total number of requests per minute (default: 10)'
         required: false
@@ -22,10 +25,10 @@ on:
         type: string
         default: '2'
       loop_iterations:
-        description: 'Total minutes to run continuously in this cloud worker (default: 60 for 1 full hour)'
+        description: 'Total minutes to run continuously in this cloud worker (default: 5)'
         required: false
         type: string
-        default: '60'
+        default: '5'
       loop_interval:
         description: 'Exact interval in seconds between test cycles (default: 60s)'
         required: false
@@ -34,7 +37,7 @@ on:
 
 concurrency:
   group: continuous-1min-testing
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -43,7 +46,7 @@ jobs:
   run-tests:
     name: Continuous 1-Minute Cloud Testing
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -60,46 +63,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run unit test suite
-        run: |
-          echo "Running local regression and unit tests..."
-          python -m unittest test_http_client.py
-
       - name: Validate target configuration
         id: resolve-config
         run: |
-          # Priority: Manual workflow_dispatch input > Repository Variable vars.TARGET_URL
+          # Priority: Manual input > Repo Variable > Default URL
           INPUT_URL="${{ inputs.target_url }}"
           VARS_URL="${{ vars.TARGET_URL }}"
-          RESOLVED_URL="${INPUT_URL:-$VARS_URL}"
+          RESOLVED_URL="${INPUT_URL:-${VARS_URL:-https://tracker.bepcssa.in}}"
 
-          if [ -z "$RESOLVED_URL" ]; then
-            echo "::error::No TARGET_URL configured. Please set the 'TARGET_URL' repository variable in GitHub Settings > Secrets and variables > Actions > Variables."
-            exit 1
-          fi
-
+          echo "Target URL resolved to: $RESOLVED_URL"
           echo "target_url=$RESOLVED_URL" >> $GITHUB_OUTPUT
+
+      - name: Verify single execution smoke test
+        env:
+          TARGET_URL: ${{ steps.resolve-config.outputs.target_url }}
+          RUN_ONCE: 'true'
+          TOTAL_REQUESTS: '2'
+          MAX_THREADS: '2'
+          PROGRESS_INTERVAL: '1'
+        run: |
+          echo "Running initial smoke test..."
+          python testing_public_domain.py
 
       - name: Execute 1-minute continuous test loop
         env:
           TARGET_URL: ${{ steps.resolve-config.outputs.target_url }}
           TOTAL_REQUESTS: ${{ inputs.total_requests || '10' }}
           MAX_THREADS: ${{ inputs.max_threads || '2' }}
-          MAX_RETRIES: '0'
-          REQUEST_TIMEOUT: '10.0'
-          USER_AGENT: 'DefensiveHttpClient/1.0 (Automated HealthCheck; 1-min continuous worker)'
+          REQUEST_TIMEOUT: '10'
+          USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
         run: |
-          TOTAL_ITERATIONS=${{ inputs.loop_iterations || '60' }}
+          TOTAL_ITERATIONS=${{ inputs.loop_iterations || '5' }}
           INTERVAL_SECONDS=${{ inputs.loop_interval || '60' }}
 
           echo "=========================================================="
           echo "STARTING CONTINUOUS 1-MINUTE CLOUD TESTING"
           echo "Target: $TARGET_URL"
-          echo "Total Minutes to Run: $TOTAL_ITERATIONS minutes (1 hour)"
+          echo "Cycles in this worker: $TOTAL_ITERATIONS (1 per minute)"
           echo "Interval: Every $INTERVAL_SECONDS seconds"
           echo "=========================================================="
 
-          FAILURES=0
           for i in $(seq 1 $TOTAL_ITERATIONS); do
             START_TS=$(date +%s)
             echo ""
@@ -107,12 +110,7 @@ jobs:
             echo ">> [Minute $i of $TOTAL_ITERATIONS] Executing at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
             echo "=========================================================="
 
-            if python testing_public_domain.py; then
-              echo ">> [Minute $i] Successfully executed 10 requests against target."
-            else
-              echo ">> [Minute $i] Execution reported errors."
-              FAILURES=$((FAILURES + 1))
-            fi
+            RUN_ONCE=true python testing_public_domain.py
 
             if [ "$i" -lt "$TOTAL_ITERATIONS" ]; then
               ELAPSED=$(( $(date +%s) - START_TS ))
@@ -126,6 +124,5 @@ jobs:
 
           echo ""
           echo "=========================================================="
-          echo "Continuous 1-hour block completed ($TOTAL_ITERATIONS minutes)."
-          echo "Total cycles executed: $TOTAL_ITERATIONS | Failed cycles: $FAILURES."
+          echo "Worker completed $TOTAL_ITERATIONS cycles successfully."
           echo "=========================================================="

@@ -1,1 +1,1 @@
-worker: python testing_public_domain.py
+web: python server.py

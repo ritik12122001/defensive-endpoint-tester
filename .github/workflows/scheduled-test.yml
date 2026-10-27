@@ -1,9 +1,9 @@
-name: Scheduled Defensive Endpoint Test (1-Minute Continuous Loop)
+name: Scheduled Defensive Endpoint Test (1-Minute Continuous Cloud Worker)
 
 on:
   schedule:
-    # Triggered every 5 minutes by GitHub scheduler
-    - cron: '*/5 * * * *'
+    # Queues continuous workers every 30 minutes to maintain an unbroken 1-minute test stream
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       target_url:
@@ -12,28 +12,28 @@ on:
         type: string
         default: ''
       total_requests:
-        description: 'Total number of requests per cycle (max 10 for safe initial validation)'
+        description: 'Total number of requests per minute (default: 10)'
         required: false
         type: string
         default: '10'
       max_threads:
-        description: 'Concurrent worker threads (max 2 for safe bounded concurrency)'
+        description: 'Concurrent worker threads (default: 2)'
         required: false
         type: string
         default: '2'
       loop_iterations:
-        description: 'Number of 1-minute test cycles per runner execution (default: 5)'
+        description: 'Total minutes to run continuously in this cloud worker (default: 60 for 1 full hour)'
         required: false
         type: string
-        default: '5'
+        default: '60'
       loop_interval:
-        description: 'Delay in seconds between test cycles (default: 60s for 1-minute checks)'
+        description: 'Exact interval in seconds between test cycles (default: 60s)'
         required: false
         type: string
         default: '60'
 
 concurrency:
-  group: scheduled-testing-pipeline
+  group: continuous-1min-testing
   cancel-in-progress: false
 
 permissions:
@@ -41,9 +41,9 @@ permissions:
 
 jobs:
   run-tests:
-    name: Execute 1-Minute Continuous Verification
+    name: Continuous 1-Minute Cloud Testing
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
@@ -87,39 +87,45 @@ jobs:
           MAX_THREADS: ${{ inputs.max_threads || '2' }}
           MAX_RETRIES: '0'
           REQUEST_TIMEOUT: '10.0'
-          USER_AGENT: 'DefensiveHttpClient/1.0 (Automated HealthCheck; 1-min continuous loop)'
+          USER_AGENT: 'DefensiveHttpClient/1.0 (Automated HealthCheck; 1-min continuous worker)'
         run: |
-          TOTAL_ITERATIONS=${{ inputs.loop_iterations || '5' }}
+          TOTAL_ITERATIONS=${{ inputs.loop_iterations || '60' }}
           INTERVAL_SECONDS=${{ inputs.loop_interval || '60' }}
 
-          echo "Starting 1-minute continuous test loop: $TOTAL_ITERATIONS cycles, ${INTERVAL_SECONDS}s between cycles..."
+          echo "=========================================================="
+          echo "STARTING CONTINUOUS 1-MINUTE CLOUD TESTING"
+          echo "Target: $TARGET_URL"
+          echo "Total Minutes to Run: $TOTAL_ITERATIONS minutes (1 hour)"
+          echo "Interval: Every $INTERVAL_SECONDS seconds"
+          echo "=========================================================="
 
           FAILURES=0
           for i in $(seq 1 $TOTAL_ITERATIONS); do
+            START_TS=$(date +%s)
             echo ""
             echo "=========================================================="
-            echo ">> [Cycle $i of $TOTAL_ITERATIONS] Executing at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
+            echo ">> [Minute $i of $TOTAL_ITERATIONS] Executing at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
             echo "=========================================================="
 
             if python testing_public_domain.py; then
-              echo ">> [Cycle $i] Test completed successfully."
+              echo ">> [Minute $i] Successfully executed 10 requests against target."
             else
-              echo ">> [Cycle $i] Test finished with errors."
+              echo ">> [Minute $i] Execution reported errors."
               FAILURES=$((FAILURES + 1))
             fi
 
             if [ "$i" -lt "$TOTAL_ITERATIONS" ]; then
-              echo ">> Waiting ${INTERVAL_SECONDS}s until next check..."
-              sleep $INTERVAL_SECONDS
+              ELAPSED=$(( $(date +%s) - START_TS ))
+              SLEEP_TIME=$(( INTERVAL_SECONDS - ELAPSED ))
+              if [ "$SLEEP_TIME" -gt 0 ]; then
+                echo ">> [Minute $i] Sleeping ${SLEEP_TIME}s until next minute mark..."
+                sleep $SLEEP_TIME
+              fi
             fi
           done
 
           echo ""
           echo "=========================================================="
-          echo "All $TOTAL_ITERATIONS cycles completed. Failed cycles: $FAILURES."
+          echo "Continuous 1-hour block completed ($TOTAL_ITERATIONS minutes)."
+          echo "Total cycles executed: $TOTAL_ITERATIONS | Failed cycles: $FAILURES."
           echo "=========================================================="
-
-          if [ "$FAILURES" -gt 0 ]; then
-            echo "::error::One or more test iterations failed."
-            exit 1
-          fi

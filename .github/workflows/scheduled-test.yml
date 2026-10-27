@@ -1,8 +1,8 @@
-name: Scheduled Defensive Endpoint Test
+name: Scheduled Defensive Endpoint Test (1-Minute Continuous Loop)
 
 on:
   schedule:
-    # Run every 5 minutes
+    # Triggered every 5 minutes by GitHub scheduler
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
       total_requests:
-        description: 'Total number of requests (max 10 for safe initial validation)'
+        description: 'Total number of requests per cycle (max 10 for safe initial validation)'
         required: false
         type: string
         default: '10'
@@ -21,6 +21,16 @@ on:
         required: false
         type: string
         default: '2'
+      loop_iterations:
+        description: 'Number of 1-minute test cycles per runner execution (default: 5)'
+        required: false
+        type: string
+        default: '5'
+      loop_interval:
+        description: 'Delay in seconds between test cycles (default: 60s for 1-minute checks)'
+        required: false
+        type: string
+        default: '60'
 
 concurrency:
   group: scheduled-testing-pipeline
@@ -31,7 +41,7 @@ permissions:
 
 jobs:
   run-tests:
-    name: Execute Tests & Integration Validation
+    name: Execute 1-Minute Continuous Verification
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -70,14 +80,46 @@ jobs:
 
           echo "target_url=$RESOLVED_URL" >> $GITHUB_OUTPUT
 
-      - name: Execute authorized integration test
+      - name: Execute 1-minute continuous test loop
         env:
           TARGET_URL: ${{ steps.resolve-config.outputs.target_url }}
           TOTAL_REQUESTS: ${{ inputs.total_requests || '10' }}
           MAX_THREADS: ${{ inputs.max_threads || '2' }}
           MAX_RETRIES: '0'
           REQUEST_TIMEOUT: '10.0'
-          USER_AGENT: 'DefensiveHttpClient/1.0 (Automated HealthCheck; authorized-runner)'
+          USER_AGENT: 'DefensiveHttpClient/1.0 (Automated HealthCheck; 1-min continuous loop)'
         run: |
-          echo "Executing bounded test against authorized target..."
-          python testing_public_domain.py
+          TOTAL_ITERATIONS=${{ inputs.loop_iterations || '5' }}
+          INTERVAL_SECONDS=${{ inputs.loop_interval || '60' }}
+
+          echo "Starting 1-minute continuous test loop: $TOTAL_ITERATIONS cycles, ${INTERVAL_SECONDS}s between cycles..."
+
+          FAILURES=0
+          for i in $(seq 1 $TOTAL_ITERATIONS); do
+            echo ""
+            echo "=========================================================="
+            echo ">> [Cycle $i of $TOTAL_ITERATIONS] Executing at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
+            echo "=========================================================="
+
+            if python testing_public_domain.py; then
+              echo ">> [Cycle $i] Test completed successfully."
+            else
+              echo ">> [Cycle $i] Test finished with errors."
+              FAILURES=$((FAILURES + 1))
+            fi
+
+            if [ "$i" -lt "$TOTAL_ITERATIONS" ]; then
+              echo ">> Waiting ${INTERVAL_SECONDS}s until next check..."
+              sleep $INTERVAL_SECONDS
+            fi
+          done
+
+          echo ""
+          echo "=========================================================="
+          echo "All $TOTAL_ITERATIONS cycles completed. Failed cycles: $FAILURES."
+          echo "=========================================================="
+
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "::error::One or more test iterations failed."
+            exit 1
+          fi
